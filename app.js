@@ -1,7 +1,7 @@
 /**
- * BunBun CSR Blogger Core - External Application Script (apps.js)
+ * BunBun CSR Blogger Core - External Application Script (app.js)
  * Version: 2.1.4
- * Hosted at: https://bunbunserver.my.id/js/apps.js
+ * Hosted at: https://cdn.jsdelivr.net/gh/luqmanthinkpad/bunbun/app.js
  *
  * Architecture:
  * - Module A: AppConfig (API base URL, limits, Blogger param hygiene)
@@ -951,11 +951,11 @@
 
   /* -------------------------------------------------------------------------
      MODULE F: POST-RENDER SCRIPT TAG CLEANUP
-     Automatically removes the apps.js <script> element from the DOM once
+     Automatically removes the app.js <script> element from the DOM once
      CSR view hydration finishes, keeping in-memory SPA listeners active.
      ------------------------------------------------------------------------- */
   var currentScriptEl = document.currentScript;
-  var TARGET_SRC = 'https://cdn.jsdelivr.net/gh/luqmanthinkpad/bunbun/apps.js';
+  var TARGET_SRC = 'https://cdn.jsdelivr.net/gh/luqmanthinkpad/bunbun/app.js';
 
   function removeAppsScript() {
     if (currentScriptEl && currentScriptEl.parentNode) {
@@ -965,7 +965,7 @@
     for (var i = 0; i < scripts.length; i++) {
       var rawSrc = scripts[i].getAttribute('src') || '';
       var fullSrc = scripts[i].src || '';
-      if (rawSrc === TARGET_SRC || fullSrc === TARGET_SRC || rawSrc.indexOf('/bunbun/apps.js') !== -1) {
+      if (rawSrc === TARGET_SRC || fullSrc === TARGET_SRC || rawSrc.indexOf('/bunbun/app.js') !== -1) {
         if (scripts[i].parentNode) {
           scripts[i].parentNode.removeChild(scripts[i]);
         }
