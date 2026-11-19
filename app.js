@@ -1,1011 +1,1032 @@
-/**
- * BunBun CSR Blogger Core - External Application Script (app.js)
- * Version: 2.1.4
- * Hosted at: https://cdn.jsdelivr.net/gh/luqmanthinkpad/bunbun/app.js
- *
- * Architecture:
- * - Module A: AppConfig (API base URL, limits, Blogger param hygiene)
- * - Module B: ThemeTemplates (Isolated DOM HTML Builders for easy redesigns)
- * - Module C: SEOController (<head> mutations & JSON-LD management)
- * - Module D: ApiClient (In-memory cache + fetch wrapper)
- * - Module E: Router (4-View state machine & History API)
- */
-(function(window, document) {
-  'use strict';
+// CSR Engine (Classic Light Slate - Variant #1) | Version: v2.0-stateless-wrs
+const APP_VERSION = 'v2.0-stateless-wrs';
+const API_BASE = 'https://bunbunserver.my.id';
+const SITE_ORIGIN = window.location.origin;
 
-  /* -------------------------------------------------------------------------
-     MODULE A: CONFIGURATION & CONSTANTS
-     ------------------------------------------------------------------------- */
-  var AppConfig = {
-    API_BASE: 'https://bunbunserver.my.id',
-    SITE_TITLE: (document.getElementById('bbs-site-title') && document.getElementById('bbs-site-title').textContent.trim()) || document.title || 'Technical Specification Database',
-    HOMEPAGE_LIMIT: 24,
-    CATEGORY_LIMIT: 24,
-    RELATED_POSTS_LIMIT: 10,
-    CROSS_DOMAIN_LINKS_LIMIT: 5,
-    SENTENCES_PER_PARAGRAPH: 3,
-    PARAGRAPHS_PER_INLINE_IMAGE: 2,
-    IGNORED_BLOGGER_PARAMS: ['m', 'zx', 'gclid', 'fbclid']
-  };
+// Detect Stateless Search Crawlers (Googlebot WRS, Bingbot, etc.) to serve 100% pure technical HTML without 3rd-party ad bloat
+const IS_SEARCH_BOT =
+  /googlebot|adsbot-google|mediapartners-google|bingbot|slurp|duckduckbot|baiduspider|yandexbot/i.test(
+    navigator.userAgent || ''
+  );
 
-  /* -------------------------------------------------------------------------
-     UTILITIES (HTML Escaping & Formatting)
-     ------------------------------------------------------------------------- */
-  var Utils = {
-    escapeHtml: function(str) {
-      if (str === null || str === undefined) return '';
-      return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    },
-    formatDate: function(epochSeconds) {
-      if (!epochSeconds) return '';
-      var d = new Date(epochSeconds * 1000);
-      if (isNaN(d.getTime())) return '';
-      return d.toISOString().split('T')[0];
-    },
-    toIsoDate: function(epochSeconds) {
-      if (!epochSeconds) return new Date().toISOString();
-      var d = new Date(epochSeconds * 1000);
-      return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
-    },
-    getCleanOrigin: function() {
-      return window.location.origin;
-    },
-    getCleanHostname: function() {
-      return window.location.hostname;
-    },
-    buildCanonicalUrl: function(relativePath) {
-      var origin = Utils.getCleanOrigin();
-      if (!relativePath || relativePath === '/') return origin + '/';
-      return origin + (relativePath.charAt(0) === '/' ? relativePath : '/' + relativePath);
+const appContainer = document.getElementById('app');
+const topAdSlot = document.getElementById('ad-top-slot');
+const bottomStickyAdSlot = document.getElementById('ad-bottom-sticky');
+
+// Master AbortController to detach the #app error listener once hydration completes
+const cleanupController = new AbortController();
+const cleanupSignal = cleanupController.signal;
+
+// Read initial site defaults directly from DOM
+const DEFAULT_SITE_NAME =
+  document.getElementById('brand-link')?.textContent.trim().replace(/\s+/g, ' ') ||
+  document.title.trim() ||
+  'Technical Knowledge Base';
+const DEFAULT_DESC = document.getElementById('meta-desc')?.getAttribute('content') || '';
+const DEFAULT_KEYWORDS = document.getElementById('meta-keywords')?.getAttribute('content') || '';
+
+// Ad Unit Configurations (hiibel.com) - Mutable reference so it can be garbage-collected on teardown
+let AD_UNITS = {
+  desktopTop: {
+    key: '6bc878b50f4ca4fe0f9f00a24603655f',
+    width: 728,
+    height: 90,
+    src: 'https://hiibel.com/22/6bc878b50f4ca4fe0f9f00a24603655f'
+  },
+  mobileTop: {
+    key: '659b04a20a0861b7619a7103d607c7d3',
+    width: 320,
+    height: 50,
+    src: 'https://hiibel.com/22/659b04a20a0861b7619a7103d607c7d3'
+  },
+  desktopBottom: {
+    key: 'a215683d2d0ce8fecd54e01b99606d75',
+    width: 300,
+    height: 250,
+    src: 'https://hiibel.com/22/a215683d2d0ce8fecd54e01b99606d75'
+  },
+  mobileBottom: {
+    key: '659b04a20a0861b7619a7103d607c7d3',
+    width: 320,
+    height: 50,
+    src: 'https://hiibel.com/22/659b04a20a0861b7619a7103d607c7d3'
+  }
+};
+
+// In-Memory 600x400 SVG Data URI Fallback (Zero Network Requests, Zero Retry Loops)
+const FALLBACK_SVG_URI =
+  "data:image/svg+xml;charset=utf-8," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400">' +
+      '<rect width="100%" height="100%" fill="#e2e8f0"/>' +
+      '<rect x="16" y="16" width="568" height="368" rx="4" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6 4"/>' +
+      '<text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#475569" font-family="system-ui,sans-serif" font-size="15">Technical Diagram Unavailable</text>' +
+    '</svg>'
+  );
+
+// Initialize Footer Year & Default Open Graph Image
+const footerYearEl = document.getElementById('footer-year');
+if (footerYearEl) footerYearEl.textContent = new Date().getFullYear();
+
+const ogImageEl = document.getElementById('og-image');
+if (ogImageEl) ogImageEl.setAttribute('content', FALLBACK_SVG_URI);
+
+// Capture-Phase Image Error Guard (Bound to cleanupSignal; detached immediately in finalizeEngine)
+appContainer.addEventListener(
+  'error',
+  (event) => {
+    const target = event.target;
+    if (!target || target.tagName !== 'IMG') return;
+    if (target.dataset.fallbackApplied === '1') return;
+    target.dataset.fallbackApplied = '1';
+    target.removeAttribute('srcset');
+    target.src = FALLBACK_SVG_URI;
+  },
+  { capture: true, signal: cleanupSignal }
+);
+
+// ============================================================================
+// PARALLEL <HEAD> IN-FLIGHT PROMISE CONSUMER (CSR v2.0)
+// ============================================================================
+function fetchPrimaryJson(url) {
+  const prefetched = window.__CSR_PREFETCH__;
+  if (prefetched) {
+    delete window.__CSR_PREFETCH__;
+    if (prefetched.u === url && prefetched.p) {
+      return prefetched.p;
     }
-  };
+  }
+  return fetch(url, {
+    priority: 'high',
+    cache: 'no-store'
+  });
+}
 
-  /* -------------------------------------------------------------------------
-     MODULE B: PLUGGABLE RENDER TEMPLATES (window.ThemeTemplates)
-     Redesigners can override or edit any function in ThemeTemplates to change
-     the HTML structure without altering API calls, SEO, or routing logic.
-     ------------------------------------------------------------------------- */
-  var ThemeTemplates = {
-    /* 1. Category Navigation Pill */
-    categoryPill: function(cat, activeCategorySlug) {
-      var isAll = cat.category === 'all';
-      var isActive = (isAll && (!activeCategorySlug || activeCategorySlug === 'all')) || (cat.category === activeCategorySlug);
-      var href = isAll ? '/' : '/?category=' + encodeURIComponent(cat.category);
-      var countBadge = typeof cat.count === 'number'
-        ? '<span class="bbs-cat-pill__count">' + Utils.escapeHtml(cat.count) + '</span>'
+// ============================================================================
+// STATELESS ROUTE FINGERPRINTING & IMMEDIATE SELF-CLEANING TEARDOWN
+// ============================================================================
+function setRouteFingerprint({ route, category = '', slug = '' }) {
+  if (!document.body) return;
+  document.body.setAttribute('data-route', route);
+  if (category) {
+    document.body.setAttribute('data-category', category);
+  } else {
+    document.body.removeAttribute('data-category');
+  }
+  if (slug) {
+    document.body.setAttribute('data-slug', slug);
+  } else {
+    document.body.removeAttribute('data-slug');
+  }
+}
+
+function removeScriptTag() {
+  const scriptById = document.getElementById('csr-app-script');
+  if (scriptById) {
+    scriptById.remove();
+    return;
+  }
+  const scriptBySrc = document.querySelector('script[src*="app.js"], script[src*="app-v2.js"]');
+  if (scriptBySrc) scriptBySrc.remove();
+}
+
+function finalizeEngine() {
+  // Ensure no unclaimed prefetch promise remains on window (e.g., on 404 or invalid query params)
+  if (window.__CSR_PREFETCH__) {
+    delete window.__CSR_PREFETCH__;
+  }
+
+  if (cleanupSignal.aborted) return;
+
+  // 1. Detach the capture-phase image error listener on #app (zero active listeners left)
+  cleanupController.abort();
+
+  // 2. Remove the <script> tag from the live DOM
+  removeScriptTag();
+
+  // 3. Release object references for V8 Garbage Collection
+  Templates = null;
+  AD_UNITS = null;
+}
+
+function setAppBusy(isBusy) {
+  appContainer.setAttribute('aria-busy', isBusy ? 'true' : 'false');
+}
+
+function safeImgUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return FALLBACK_SVG_URI;
+  const trimmed = rawUrl.trim();
+  if (/^https?:\/\//i.test(trimmed) || trimmed.startsWith('data:image/')) {
+    return trimmed;
+  }
+  return FALLBACK_SVG_URI;
+}
+
+function escapeHtml(str = '') {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function toIsoDate(epochSeconds) {
+  if (!epochSeconds || Number.isNaN(Number(epochSeconds))) {
+    return new Date().toISOString();
+  }
+  return new Date(Number(epochSeconds) * 1000).toISOString();
+}
+
+function formatReadableDate(epochSeconds) {
+  if (!epochSeconds || Number.isNaN(Number(epochSeconds))) return '';
+  return new Date(Number(epochSeconds) * 1000).toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  });
+}
+
+function buildCategoryPath(categorySlug) {
+  return `/?category=${encodeURIComponent(categorySlug)}`;
+}
+
+function buildArticlePath(categorySlug, articleSlug) {
+  return `/?category=${encodeURIComponent(categorySlug)}&slug=${encodeURIComponent(articleSlug)}`;
+}
+
+// Single-Article ImageObject Builder (Excludes data: URIs for Google Rich Results compliance)
+function buildArticleImageObjects(images = [], articleTitle = '', fullArticleUrl = '') {
+  if (!Array.isArray(images) || images.length === 0) return [];
+  const items = [];
+
+  images.forEach((img, idx) => {
+    const cleanUrl = safeImgUrl(img?.url);
+    if (cleanUrl === FALLBACK_SVG_URI) return;
+
+    const label = String(img?.title || img?.alt || articleTitle || 'Technical Diagram').trim();
+    const altDesc = String(img?.alt || img?.title || articleTitle || 'Technical Diagram').trim();
+
+    items.push({
+      '@type': 'ImageObject',
+      '@id': `${fullArticleUrl}#image-${idx + 1}`,
+      url: cleanUrl,
+      contentUrl: cleanUrl,
+      name: label,
+      caption: `Fig. ${idx + 1} \u2014 ${label}`,
+      description: altDesc,
+      width: Number(img?.width) || 600,
+      height: Number(img?.height) || 400,
+      representativeOfPage: idx === 0
+    });
+  });
+
+  return items;
+}
+
+function groupSentencesIntoParagraphs(sentences = [], fallbackContent = '', perParagraph = 4) {
+  if (Array.isArray(sentences) && sentences.length > 0) {
+    const paragraphs = [];
+    for (let i = 0; i < sentences.length; i += perParagraph) {
+      const chunk = sentences
+        .slice(i, i + perParagraph)
+        .map((s) => escapeHtml(String(s).trim()))
+        .filter(Boolean)
+        .join(' ');
+      if (chunk) paragraphs.push(`<p>${chunk}</p>`);
+    }
+    return paragraphs.join('');
+  }
+  if (fallbackContent) {
+    return `<p>${escapeHtml(fallbackContent)}</p>`;
+  }
+  return '';
+}
+
+// ============================================================================
+// BOT-AWARE IMMEDIATE GLOBAL AD MANAGER (HUMANS ONLY)
+// ============================================================================
+function mountAdIframe(containerEl, unit) {
+  if (!containerEl || !unit) return;
+  containerEl.innerHTML = '';
+  containerEl.hidden = false;
+
+  const iframe = document.createElement('iframe');
+  iframe.className = 'ad-iframe';
+  iframe.width = String(unit.width);
+  iframe.height = String(unit.height);
+  iframe.setAttribute('scrolling', 'no');
+  iframe.setAttribute('frameborder', '0');
+  iframe.setAttribute('title', 'Advertisement');
+
+  const optionsJson = JSON.stringify({
+    key: unit.key,
+    format: 'iframe',
+    height: unit.height,
+    width: unit.width,
+    params: {}
+  });
+
+  iframe.srcdoc =
+    `<!DOCTYPE html><html><head><base href="${SITE_ORIGIN}/"><style>html,body{margin:0;padding:0;overflow:hidden;background:transparent;display:flex;justify-content:center;align-items:center;}</style></head><body>` +
+    `<script>atOptions = ${optionsJson};<\/script>` +
+    `<script src="${unit.src}"><\/script>` +
+    '</body></html>';
+
+  containerEl.appendChild(iframe);
+}
+
+function clearGlobalAds() {
+  if (topAdSlot) {
+    topAdSlot.innerHTML = '';
+    topAdSlot.hidden = true;
+  }
+  if (bottomStickyAdSlot) {
+    bottomStickyAdSlot.innerHTML = '';
+    bottomStickyAdSlot.hidden = true;
+  }
+  if (document.body) {
+    document.body.style.paddingBottom = '';
+  }
+}
+
+// Immediate Global Ads (Humans Only):
+// 1. Top Banner: 320x50 on Mobile (<=767px) or 728x90 on Non-Mobile (>=768px)
+// 2. Sticky Bottom Banner: 320x50 on Mobile (<=767px) or 300x250 on Non-Mobile (>=768px) without scrolling
+function scheduleGlobalAds() {
+  if (IS_SEARCH_BOT || !AD_UNITS) {
+    if (IS_SEARCH_BOT) clearGlobalAds();
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        if (AD_UNITS) {
+          const isMobile = window.matchMedia('(max-width: 767px)').matches;
+          if (topAdSlot) {
+            const selectedTopUnit = isMobile ? AD_UNITS.mobileTop : AD_UNITS.desktopTop;
+            mountAdIframe(topAdSlot, selectedTopUnit);
+          }
+          if (bottomStickyAdSlot) {
+            const selectedBottomUnit = isMobile ? AD_UNITS.mobileBottom : AD_UNITS.desktopBottom;
+            mountAdIframe(bottomStickyAdSlot, selectedBottomUnit);
+            if (document.body && selectedBottomUnit) {
+              document.body.style.paddingBottom = `${selectedBottomUnit.height + 14}px`;
+            }
+          }
+        }
+        resolve();
+      }, 0);
+    });
+  });
+}
+
+// ============================================================================
+// ISOLATED MODULAR HTML TEMPLATES (Homepage-Only Bottom Categories)
+// ============================================================================
+let Templates = {
+  homeCategoriesBox(categories = []) {
+    if (!Array.isArray(categories) || categories.length === 0) return '';
+    const itemsHtml = categories
+      .map((cat) => {
+        const href = buildCategoryPath(cat.category);
+        return `
+          <li>
+            <a class="nav-link" href="${href}">
+              <span>${escapeHtml(cat.label || cat.category)}</span>
+              ${typeof cat.count === 'number' ? `<span class="nav-count">(${cat.count})</span>` : ''}
+            </a>
+          </li>
+        `;
+      })
+      .join('');
+
+    return `
+      <div class="home-categories-header">
+        <h2 class="home-categories-title">Browse All Technical Categories (${categories.length})</h2>
+      </div>
+      <ul class="home-categories-list">
+        ${itemsHtml}
+      </ul>
+    `;
+  },
+
+  articleCard(card, index = 0) {
+    const articleHref = card.url || buildArticlePath(card.category, card.slug);
+    const categoryHref = buildCategoryPath(card.category);
+    const imgSrc = safeImgUrl(card.thumbnail || card.image);
+    const imgAlt = card.imageAlt || card.title || 'Technical specification diagram';
+    const specCode = `#${String(index + 1).padStart(2, '0')}`;
+
+    return `
+      <li class="article-card">
+        <a class="card-media" href="${escapeHtml(articleHref)}">
+          <img
+            src="${escapeHtml(imgSrc)}"
+            alt="${escapeHtml(imgAlt)}"
+            width="600"
+            height="400"
+            loading="lazy"
+            decoding="async"
+          />
+        </a>
+        <div class="card-body">
+          <div class="card-top-meta">
+            <a class="card-category" href="${escapeHtml(categoryHref)}">
+              ${escapeHtml(card.categoryLabel || card.category)}
+            </a>
+            <span class="card-code">${specCode}</span>
+          </div>
+          <h2 class="card-title">
+            <a href="${escapeHtml(articleHref)}">${escapeHtml(card.title)}</a>
+          </h2>
+          <p class="card-excerpt">${escapeHtml(card.excerpt || '')}</p>
+        </div>
+      </li>
+    `;
+  },
+
+  listingView({
+    heading,
+    subheading = '',
+    breadcrumbLabel = '',
+    articles = [],
+    showHomeCategories = false,
+    categories = []
+  }) {
+    const breadcrumbHtml = breadcrumbLabel
+      ? `<nav class="breadcrumb" aria-label="Breadcrumb">
+           <a href="/">Home</a> &raquo; <span>${escapeHtml(breadcrumbLabel)}</span>
+         </nav>`
+      : '';
+
+    const gridHtml =
+      articles.length > 0
+        ? `<ul class="article-grid">${articles.map((c, idx) => Templates.articleCard(c, idx)).join('')}</ul>`
+        : `<p>No technical articles available in this section.</p>`;
+
+    // Render Category Directory ONLY on Homepage at Bottom of Main (Below Articles)
+    let homeCategoriesHtml = '';
+    if (showHomeCategories) {
+      const hasImmediateCategories = Array.isArray(categories) && categories.length > 0;
+      homeCategoriesHtml = `
+        <section id="home-categories-slot" class="home-categories" aria-label="Technical Categories Directory"${hasImmediateCategories ? '' : ' hidden'}>
+          ${hasImmediateCategories ? Templates.homeCategoriesBox(categories) : ''}
+        </section>
+      `;
+    }
+
+    return `
+      <section>
+        ${breadcrumbHtml}
+        <header class="section-header">
+          <h1 class="section-title">${escapeHtml(heading)}</h1>
+          ${subheading ? `<p class="section-subtitle">${escapeHtml(subheading)}</p>` : ''}
+        </header>
+        ${gridHtml}
+        ${homeCategoriesHtml}
+      </section>
+    `;
+  },
+
+  singleArticle(article) {
+    const categoryHref = buildCategoryPath(article.category);
+    const images = Array.isArray(article.images) ? article.images : [];
+    const heroImg = images.length > 0 ? images[0] : null;
+    const readableDate = formatReadableDate(article.updatedAt || article.createdAt);
+    const isoDate = toIsoDate(article.updatedAt || article.createdAt);
+
+    // 1. Hero Image (images[0])
+    const heroHtml = heroImg
+      ? `<figure class="article-hero">
+           <img
+             src="${escapeHtml(safeImgUrl(heroImg.url))}"
+             alt="${escapeHtml(heroImg.alt || article.title)}"
+             width="${Number(heroImg.width) || 600}"
+             height="${Number(heroImg.height) || 400}"
+             fetchpriority="high"
+             decoding="async"
+           />
+           <figcaption>Fig. 1 &mdash; ${escapeHtml(heroImg.title || heroImg.alt || article.title)}</figcaption>
+         </figure>`
+      : '';
+
+    // 2. Article Text Body (sentences[])
+    const bodyParagraphsHtml = groupSentencesIntoParagraphs(article.sentences, article.content, 4);
+
+    // 3. Full Technical Diagrams Gallery (All images[] from 0 to images.length - 1)
+    const galleryHtml =
+      images.length > 0
+        ? `<section class="article-gallery" aria-label="Technical Diagrams Gallery">
+             <h2 class="gallery-heading">Technical Diagrams &amp; Schematics (${images.length})</h2>
+             <div class="gallery-grid">
+               ${images
+                 .map(
+                   (img, idx) => `
+                     <figure class="gallery-card">
+                       <img
+                         src="${escapeHtml(safeImgUrl(img.url))}"
+                         alt="${escapeHtml(img.alt || img.title || article.title)}"
+                         width="${Number(img.width) || 600}"
+                         height="${Number(img.height) || 400}"
+                         loading="lazy"
+                         decoding="async"
+                       />
+                       <figcaption>Fig. ${idx + 1} &mdash; ${escapeHtml(img.title || img.alt || article.title)}</figcaption>
+                     </figure>
+                   `
+                 )
+                 .join('')}
+             </div>
+           </section>`
         : '';
-      return (
-        '<a class="bbs-cat-pill' + (isActive ? ' is-active' : '') + '" data-csr-link="true" href="' + Utils.escapeHtml(href) + '">' +
-          '<span>' + Utils.escapeHtml(cat.label) + '</span>' +
-          countBadge +
-        '</a>'
-      );
-    },
 
-    /* 2. Listing Section Banner (Homepage, Search, Category) */
-    listingBanner: function(eyebrow, title, metaRightHtml) {
-      return (
-        '<header class="bbs-view-banner">' +
-          '<div>' +
-            '<div class="bbs-view-banner__eyebrow">' + Utils.escapeHtml(eyebrow) + '</div>' +
-            '<h1 class="bbs-view-banner__title">' + Utils.escapeHtml(title) + '</h1>' +
-          '</div>' +
-          (metaRightHtml ? '<div class="bbs-view-banner__meta">' + metaRightHtml + '</div>' : '') +
-        '</header>'
-      );
-    },
+    // 4. Single Article + Phase 2 Low-Priority Bottom Link Slots
+    return `
+      <div class="single-article-wrap">
+        <article class="single-article">
+          <nav class="breadcrumb" aria-label="Breadcrumb">
+            <a href="/">Home</a> &raquo;
+            <a href="${escapeHtml(categoryHref)}">${escapeHtml(article.categoryLabel || article.category)}</a> &raquo;
+            <span>${escapeHtml(article.title)}</span>
+          </nav>
 
-    /* 3. Article Summary Card (Used on Homepage & Category Grids) */
-    articleCard: function(card) {
-      var articleHref = card.url || ('/?category=' + encodeURIComponent(card.category) + '&slug=' + encodeURIComponent(card.slug));
-      var categoryHref = '/?category=' + encodeURIComponent(card.category);
-      var imgSrc = card.thumbnail || card.image || '';
-      var mediaContent = imgSrc
-        ? '<img class="bbs-card__img" src="' + Utils.escapeHtml(imgSrc) + '" alt="' + Utils.escapeHtml(card.imageAlt || card.title) + '" loading="lazy" width="600" height="375" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'"/>' +
-          '<div class="bbs-card__fallback" style="display:none"><span>[DIAGRAM PREVIEW]</span><span>' + Utils.escapeHtml(card.categoryLabel || card.category) + '</span></div>'
-        : '<div class="bbs-card__fallback"><span>[TECHNICAL ENTRY]</span><span>' + Utils.escapeHtml(card.categoryLabel || card.category) + '</span></div>';
+          <h1 class="article-title">${escapeHtml(article.title)}</h1>
 
-      return (
-        '<article class="bbs-card">' +
-          '<div class="bbs-card__media">' +
-            '<a data-csr-link="true" href="' + Utils.escapeHtml(articleHref) + '" tabindex="-1">' +
-              mediaContent +
-            '</a>' +
-            '<a class="bbs-card__badge" data-csr-link="true" href="' + Utils.escapeHtml(categoryHref) + '">' +
-              Utils.escapeHtml(card.categoryLabel || card.category) +
-            '</a>' +
-          '</div>' +
-          '<div class="bbs-card__body">' +
-            '<h2 class="bbs-card__title">' +
-              '<a data-csr-link="true" href="' + Utils.escapeHtml(articleHref) + '">' +
-                Utils.escapeHtml(card.title) +
-              '</a>' +
-            '</h2>' +
-            '<p class="bbs-card__excerpt">' + Utils.escapeHtml(card.excerpt || '') + '</p>' +
-            '<div class="bbs-card__footer">' +
-              '<span class="bbs-card__specs">' +
-                '<span>' + Utils.escapeHtml(card.imageCount || 0) + ' diag</span>' +
-                '<span>&bull;</span>' +
-                '<span>' + Utils.escapeHtml(card.sentenceCount || 0) + ' lines</span>' +
-              '</span>' +
-              '<time datetime="' + Utils.escapeHtml(Utils.toIsoDate(card.updatedAt)) + '">' +
-                Utils.escapeHtml(Utils.formatDate(card.updatedAt)) +
-              '</time>' +
-            '</div>' +
-          '</div>' +
-        '</article>'
-      );
-    },
+          <div class="article-meta">
+            <span>Category: <a href="${escapeHtml(categoryHref)}">${escapeHtml(article.categoryLabel || article.category)}</a></span>
+            ${readableDate ? `<span>&bull; Updated <time datetime="${escapeHtml(isoDate)}">${escapeHtml(readableDate)}</time></span>` : ''}
+            ${article.imageCount ? `<span>&bull; ${Number(article.imageCount)} Diagrams</span>` : ''}
+          </div>
 
-    /* 4. Single Article View (Interleaves sentences[] and images[] + Sidebar Mounts) */
-    singleArticleView: function(article) {
-      var catHref = '/?category=' + encodeURIComponent(article.category);
-      var images = Array.isArray(article.images) ? article.images : [];
-      var sentences = Array.isArray(article.sentences) && article.sentences.length > 0
-        ? article.sentences
-        : (article.content ? [article.content] : []);
+          ${heroHtml}
 
-      /* Group validated sentences into readable technical paragraphs */
-      var paragraphs = [];
-      var chunkSize = AppConfig.SENTENCES_PER_PARAGRAPH;
-      for (var i = 0; i < sentences.length; i += chunkSize) {
-        paragraphs.push(sentences.slice(i, i + chunkSize).join(' '));
-      }
+          <div class="article-body">
+            ${bodyParagraphsHtml}
+          </div>
 
-      /* Hero Figure (Image #0) */
-      var heroHtml = '';
-      if (images.length > 0) {
-        var heroImg = images[0];
-        heroHtml = (
-          '<figure class="bbs-hero-figure">' +
-            '<div class="bbs-hero-figure__img-wrap">' +
-              '<img class="bbs-hero-figure__img" src="' + Utils.escapeHtml(heroImg.url || heroImg.thumb) + '" alt="' + Utils.escapeHtml(heroImg.alt || article.title) + '" width="' + Utils.escapeHtml(heroImg.width || 600) + '" height="' + Utils.escapeHtml(heroImg.height || 400) + '" loading="eager" onerror="this.closest(\'figure\').style.display=\'none\'"/>' +
-            '</div>' +
-            '<figcaption class="bbs-figure__caption">' +
-              '<span>FIG 01 — ' + Utils.escapeHtml(heroImg.title || article.title) + '</span>' +
-              (heroImg.domain ? '<span>Source: ' + Utils.escapeHtml(heroImg.domain) + '</span>' : '') +
-            '</figcaption>' +
-          '</figure>'
-        );
-      }
+          ${galleryHtml}
+        </article>
 
-      /* Interleave paragraphs and inline technical diagrams */
-      var proseHtml = '';
-      var nextImageIdx = 1;
-      for (var pIdx = 0; pIdx < paragraphs.length; pIdx++) {
-        var pClass = pIdx === 0 ? ' class="bbs-prose__lead"' : '';
-        proseHtml += '<p' + pClass + '>' + Utils.escapeHtml(paragraphs[pIdx]) + '</p>';
+        <!-- Phase 2 Low-Priority Bottom Hydration Slots (Dispatched Synchronously for WRS) -->
+        <section id="related-posts-slot" class="bottom-links-section related-posts" hidden></section>
+        <aside id="cross-domain-slot" class="bottom-links-section cross-domain-links" hidden></aside>
+      </div>
+    `;
+  },
 
-        if ((pIdx + 1) % AppConfig.PARAGRAPHS_PER_INLINE_IMAGE === 0 && nextImageIdx < images.length && nextImageIdx <= 4) {
-          var inlineImg = images[nextImageIdx];
-          var figNum = nextImageIdx + 1;
-          proseHtml += (
-            '<figure class="bbs-inline-figure">' +
-              '<img class="bbs-inline-figure__img" src="' + Utils.escapeHtml(inlineImg.url || inlineImg.thumb) + '" alt="' + Utils.escapeHtml(inlineImg.alt || inlineImg.title || article.title) + '" width="' + Utils.escapeHtml(inlineImg.width || 600) + '" height="' + Utils.escapeHtml(inlineImg.height || 400) + '" loading="lazy" onerror="this.closest(\'figure\').style.display=\'none\'"/>' +
-              '<figcaption class="bbs-figure__caption">' +
-                '<span>FIG 0' + figNum + ' — ' + Utils.escapeHtml(inlineImg.title || article.keyword) + '</span>' +
-                (inlineImg.filetype ? '<span>[' + Utils.escapeHtml(inlineImg.filetype.toUpperCase()) + ']</span>' : '') +
-              '</figcaption>' +
-            '</figure>'
-          );
-          nextImageIdx++;
-        }
-      }
+  relatedPosts(items = []) {
+    return `
+      <h2 class="bottom-links-title">Related Technical Guides</h2>
+      <ul class="link-list">
+        ${items
+          .map((item) => {
+            const href = item.url || buildArticlePath(item.category, item.slug);
+            return `
+              <li class="link-list-item">
+                <a class="link-item-title" href="${escapeHtml(href)}">${escapeHtml(item.title)}</a>
+                <p class="link-item-meta">
+                  <strong>${escapeHtml(item.categoryLabel || item.category)}:</strong>
+                  ${escapeHtml(item.excerpt || '')}
+                </p>
+              </li>
+            `;
+          })
+          .join('')}
+      </ul>
+    `;
+  },
 
-      /* Remaining diagrams rendered in structured schematic gallery */
-      var galleryHtml = '';
-      if (nextImageIdx < images.length) {
-        var galleryItems = '';
-        for (var gIdx = nextImageIdx; gIdx < images.length; gIdx++) {
-          var gImg = images[gIdx];
-          galleryItems += (
-            '<figure class="bbs-gallery-card">' +
-              '<a href="' + Utils.escapeHtml(gImg.url || gImg.thumb) + '" target="_blank" rel="noopener">' +
-                '<img class="bbs-gallery-card__img" src="' + Utils.escapeHtml(gImg.thumb || gImg.url) + '" alt="' + Utils.escapeHtml(gImg.alt || gImg.title || article.title) + '" loading="lazy" onerror="this.closest(\'figure\').style.display=\'none\'"/>' +
-              '</a>' +
-              '<figcaption class="bbs-gallery-card__cap">' +
-                Utils.escapeHtml(gImg.title || article.keyword) +
-              '</figcaption>' +
-            '</figure>'
-          );
-        }
-        galleryHtml = (
-          '<section class="bbs-gallery">' +
-            '<h2 class="bbs-gallery__title">Additional Schematics &amp; Reference Diagrams</h2>' +
-            '<div class="bbs-gallery__grid">' + galleryItems + '</div>' +
-          '</section>'
-        );
-      }
+  crossDomainLinks(pairs = []) {
+    return `
+      <h2 class="bottom-links-title">Recommended Partner Technical Resources</h2>
+      <ul class="link-list">
+        ${pairs
+          .map(
+            (pair) => `
+              <li class="link-list-item">
+                <a class="link-item-title" href="${escapeHtml(pair.fullUrl)}">${escapeHtml(pair.title)}</a>
+                <p class="link-item-meta">
+                  <span>${escapeHtml(pair.domainHost)}</span> &bull;
+                  <span>${escapeHtml(pair.categoryLabel)}</span>
+                </p>
+              </li>
+            `
+          )
+          .join('')}
+      </ul>
+    `;
+  },
 
-      /* Keyword Tags */
-      var tagsHtml = '';
-      if (article.metaKeywords) {
-        var kwList = article.metaKeywords.split(',');
-        var tagLinks = '';
-        for (var k = 0; k < kwList.length; k++) {
-          var kw = kwList[k].trim();
-          if (!kw) continue;
-          tagLinks += '<a class="bbs-tag" data-csr-link="true" href="/?q=' + encodeURIComponent(kw) + '">#' + Utils.escapeHtml(kw) + '</a>';
-        }
-        if (tagLinks) {
-          tagsHtml = '<footer class="bbs-tags" aria-label="Technical keywords">' + tagLinks + '</footer>';
-        }
-      }
+  notFound(message) {
+    return `
+      <section class="single-article-wrap">
+        <div class="single-article">
+          <h1 class="article-title">404 - Page Not Found</h1>
+          <p>${escapeHtml(message)}</p>
+          <p><a href="/">&larr; Return to Homepage</a></p>
+        </div>
+      </section>
+    `;
+  }
+};
 
-      return (
-        '<div class="bbs-article-layout">' +
-          '<article class="bbs-article">' +
-            '<nav class="bbs-breadcrumb" aria-label="Breadcrumb">' +
-              '<a data-csr-link="true" href="/">Home</a>' +
-              '<span>/</span>' +
-              '<a data-csr-link="true" href="' + Utils.escapeHtml(catHref) + '">' + Utils.escapeHtml(article.categoryLabel || article.category) + '</a>' +
-              '<span>/</span>' +
-              '<span>' + Utils.escapeHtml(article.slug) + '</span>' +
-            '</nav>' +
-            '<header class="bbs-article__header">' +
-              '<h1 class="bbs-article__title">' + Utils.escapeHtml(article.title) + '</h1>' +
-              '<div class="bbs-article__meta">' +
-                '<a class="bbs-meta-chip bbs-meta-chip--accent" data-csr-link="true" href="' + Utils.escapeHtml(catHref) + '">' +
-                  Utils.escapeHtml(article.categoryLabel || article.category) +
-                '</a>' +
-                '<span class="bbs-meta-chip">ID #' + Utils.escapeHtml(article.id) + '</span>' +
-                '<span class="bbs-meta-chip">' + Utils.escapeHtml(article.imageCount || images.length) + ' Diagrams</span>' +
-                '<span class="bbs-meta-chip">' + Utils.escapeHtml(article.sentenceCount || sentences.length) + ' Spec Lines</span>' +
-                '<time class="bbs-meta-chip" datetime="' + Utils.escapeHtml(Utils.toIsoDate(article.updatedAt)) + '">Updated ' + Utils.escapeHtml(Utils.formatDate(article.updatedAt)) + '</time>' +
-              '</div>' +
-            '</header>' +
-            heroHtml +
-            '<div class="bbs-prose">' + proseHtml + '</div>' +
-            galleryHtml +
-            tagsHtml +
-          '</article>' +
-
-          '<aside class="bbs-sidebar" aria-label="Related technical specifications">' +
-            '<section class="bbs-panel">' +
-              '<div class="bbs-panel__header">' +
-                '<h2 class="bbs-panel__title">Related Specifications</h2>' +
-                '<span class="bbs-panel__tag">LOCAL INDEX</span>' +
-              '</div>' +
-              '<div id="bbs-related-posts-mount">' +
-                ThemeTemplates.sidebarSkeleton(5) +
-              '</div>' +
-            '</section>' +
-            '<section class="bbs-panel">' +
-              '<div class="bbs-panel__header">' +
-                '<h2 class="bbs-panel__title">Partner Network Specs</h2>' +
-                '<span class="bbs-panel__tag bbs-panel__tag--amber">CROSS-DOMAIN</span>' +
-              '</div>' +
-              '<div id="bbs-cross-domain-mount">' +
-                ThemeTemplates.sidebarSkeleton(5) +
-              '</div>' +
-            '</section>' +
-          '</aside>' +
-        '</div>'
-      );
-    },
-
-    /* 5. Deferred Same-Domain Related Posts List (10 items) */
-    relatedPostsList: function(articles) {
-      if (!Array.isArray(articles) || articles.length === 0) {
-        return '<p class="bbs-rel-item__meta">No related specifications found.</p>';
-      }
-      var items = '';
-      for (var i = 0; i < articles.length; i++) {
-        var item = articles[i];
-        var href = item.url || ('/?category=' + encodeURIComponent(item.category) + '&slug=' + encodeURIComponent(item.slug));
-        items += (
-          '<li class="bbs-rel-item">' +
-            '<a class="bbs-rel-item__link" data-csr-link="true" href="' + Utils.escapeHtml(href) + '">' +
-              Utils.escapeHtml(item.title) +
-            '</a>' +
-            '<div class="bbs-rel-item__meta">' +
-              '<span>' + Utils.escapeHtml(item.categoryLabel || item.category) + '</span>' +
-              '<span>&bull;</span>' +
-              '<span>' + Utils.escapeHtml(item.imageCount || 0) + ' diag</span>' +
-            '</div>' +
-          '</li>'
-        );
-      }
-      return '<ul class="bbs-rel-list">' + items + '</ul>';
-    },
-
-    /* 6. Deferred Cross-Domain Related Links List (5 items paired with /api/domains/status - Only Title & Href) */
-    crossDomainLinksList: function(articles, activeDomains) {
-      if (!Array.isArray(articles) || articles.length === 0) {
-        return '<p class="bbs-rel-item__meta">No external network links available.</p>';
-      }
-      var domains = Array.isArray(activeDomains) && activeDomains.length > 0
-        ? activeDomains
-        : [Utils.getCleanOrigin()];
-
-      var items = '';
-      for (var i = 0; i < articles.length; i++) {
-        var art = articles[i];
-        var rawOrigin = domains[i % domains.length].replace(/\/+$/, '');
-        var path = art.url || ('/?category=' + encodeURIComponent(art.category) + '&slug=' + encodeURIComponent(art.slug));
-        var fullUrl = rawOrigin + (path.charAt(0) === '/' ? path : '/' + path);
-
-        items += (
-          '<li class="bbs-rel-item">' +
-            '<a class="bbs-rel-item__link" href="' + Utils.escapeHtml(fullUrl) + '" target="_blank" rel="noopener">' +
-              Utils.escapeHtml(art.title) +
-            '</a>' +
-          '</li>'
-        );
-      }
-      return '<ul class="bbs-rel-list">' + items + '</ul>';
-    },
-
-    /* 7. Skeletons & Loading States */
-    gridSkeleton: function(count) {
-      var cards = '';
-      for (var i = 0; i < (count || 6); i++) {
-        cards += (
-          '<div class="bbs-card" aria-hidden="true">' +
-            '<div class="bbs-card__media bbs-skeleton"></div>' +
-            '<div class="bbs-card__body">' +
-              '<div class="bbs-skeleton" style="height:20px;width:85%;margin-bottom:10px"></div>' +
-              '<div class="bbs-skeleton" style="height:14px;width:100%;margin-bottom:6px"></div>' +
-              '<div class="bbs-skeleton" style="height:14px;width:70%;margin-bottom:18px"></div>' +
-              '<div class="bbs-skeleton" style="height:12px;width:45%"></div>' +
-            '</div>' +
-          '</div>'
-        );
-      }
-      return '<div class="bbs-grid">' + cards + '</div>';
-    },
-
-    sidebarSkeleton: function(rows) {
-      var html = '';
-      for (var i = 0; i < (rows || 4); i++) {
-        html += (
-          '<div style="margin-bottom:12px">' +
-            '<div class="bbs-skeleton" style="height:15px;width:90%;margin-bottom:5px"></div>' +
-            '<div class="bbs-skeleton" style="height:11px;width:50%"></div>' +
-          '</div>'
-        );
-      }
-      return html;
-    },
-
-    /* 8. 404 / Empty Error View */
-    error404View: function(title, message) {
-      return (
-        '<section class="bbs-state-box" role="alert">' +
-          '<span class="bbs-state-box__code">HTTP 404 / NO MATCH</span>' +
-          '<h1 class="bbs-state-box__title">' + Utils.escapeHtml(title || 'Page Not Found') + '</h1>' +
-          '<p class="bbs-state-box__desc">' +
-            Utils.escapeHtml(message || 'The requested specification, category database, or search query returned no matching records in memory.') +
-          '</p>' +
-          '<a class="bbs-btn" data-csr-link="true" href="/">Return to Specification Index</a>' +
-        '</section>'
-      );
+// ============================================================================
+// IN-PLACE SEO & HOMEPAGE-ONLY CATEGORY FALLBACK HYDRATION
+// ============================================================================
+async function hydrateHomeCategoriesIfMissing() {
+  const slot = document.getElementById('home-categories-slot');
+  if (!slot || !slot.hidden) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/categories`, {
+      priority: 'low',
+      cache: 'no-store'
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (Array.isArray(data.categories) && data.categories.length > 0 && Templates) {
+      slot.innerHTML = Templates.homeCategoriesBox(data.categories);
+      slot.hidden = false;
     }
-  };
+  } catch (_) {
+    // Non-critical fallback failure ignored
+  }
+}
 
-  /* Expose ThemeTemplates globally so child scripts or future customizers can override hooks */
-  window.ThemeTemplates = ThemeTemplates;
+function updateSEO({
+  title,
+  description,
+  keywords = DEFAULT_KEYWORDS,
+  canonicalPath,
+  robots = 'index, follow',
+  ogType = 'website',
+  ogImage = FALLBACK_SVG_URI,
+  schema = null
+}) {
+  const cleanCanonicalPath = canonicalPath.startsWith('/') ? canonicalPath : `/${canonicalPath}`;
+  const fullCanonicalUrl = `${SITE_ORIGIN}${cleanCanonicalPath}`;
 
-  /* -------------------------------------------------------------------------
-     MODULE C: SEO & JSON-LD CONTROLLER (Section 5 Blueprint Compliance)
-     ------------------------------------------------------------------------- */
-  var SEOController = {
-    setMetaTag: function(id, attrName, value) {
-      var el = document.getElementById(id);
-      if (el) el.setAttribute(attrName, value || '');
-    },
+  document.title = title;
+  document.getElementById('meta-desc')?.setAttribute('content', description);
+  document.getElementById('meta-keywords')?.setAttribute('content', keywords);
+  document.getElementById('meta-robots')?.setAttribute('content', robots);
+  document.getElementById('canonical-link')?.setAttribute('href', fullCanonicalUrl);
 
-    removeJsonLdScripts: function() {
-      var existingSchema = document.getElementById('json-ld-schema');
-      if (existingSchema && existingSchema.parentNode) {
-        existingSchema.parentNode.removeChild(existingSchema);
-      }
-      var existingBreadcrumb = document.getElementById('json-ld-breadcrumb');
-      if (existingBreadcrumb && existingBreadcrumb.parentNode) {
-        existingBreadcrumb.parentNode.removeChild(existingBreadcrumb);
-      }
-    },
+  document.getElementById('og-type')?.setAttribute('content', ogType);
+  document.getElementById('og-title')?.setAttribute('content', title);
+  document.getElementById('og-desc')?.setAttribute('content', description);
+  document.getElementById('og-url')?.setAttribute('content', fullCanonicalUrl);
+  document.getElementById('og-image')?.setAttribute('content', safeImgUrl(ogImage));
 
-    injectJsonLd: function(id, payloadObj) {
-      var existing = document.getElementById(id);
-      if (existing && existing.parentNode) {
-        existing.parentNode.removeChild(existing);
-      }
-      var script = document.createElement('script');
-      script.type = 'application/ld+json';
-      script.id = id;
-      script.textContent = JSON.stringify(payloadObj);
-      document.head.appendChild(script);
-    },
+  const schemaEl = document.getElementById('schema-jsonld');
+  if (schemaEl) {
+    schemaEl.textContent = schema ? JSON.stringify(schema) : '';
+  }
+}
 
-    /* 1. Homepage SEO: <title>, Canonical (/), robots (index, follow), WebSite + ItemList */
-    applyHomepageSEO: function(articles, query) {
-      var cleanQuery = (query || '').trim();
-      var pageTitle = cleanQuery
-        ? 'Search: ' + cleanQuery + ' - ' + AppConfig.SITE_TITLE
-        : AppConfig.SITE_TITLE;
-      var canonicalUrl = Utils.buildCanonicalUrl('/');
-      var desc = cleanQuery
-        ? 'Technical specifications and schematic diagrams matching "' + cleanQuery + '" on ' + AppConfig.SITE_TITLE + '.'
-        : 'Browse random technical specifications, diagnostic procedures, and engineering diagrams on ' + AppConfig.SITE_TITLE + '.';
+function renderNotFound(message = 'The requested technical resource could not be found.') {
+  clearGlobalAds();
+  setRouteFingerprint({ route: 'not-found' });
+  updateSEO({
+    title: `404 - Page Not Found | ${DEFAULT_SITE_NAME}`,
+    description: message,
+    canonicalPath: `${window.location.pathname}${window.location.search}`,
+    robots: 'noindex, nofollow',
+    schema: null
+  });
+  if (Templates) {
+    appContainer.innerHTML = Templates.notFound(message);
+  }
+  setAppBusy(false);
+  finalizeEngine();
+}
 
-      document.title = pageTitle;
-      SEOController.setMetaTag('dynamic-canonical', 'href', canonicalUrl);
-      SEOController.setMetaTag('dynamic-robots', 'content', 'index, follow');
-      SEOController.setMetaTag('dynamic-description', 'content', desc);
-      SEOController.setMetaTag('dynamic-keywords', 'content', '');
-      SEOController.setMetaTag('og-title', 'content', pageTitle);
-      SEOController.setMetaTag('og-description', 'content', desc);
-      SEOController.setMetaTag('og-url', 'content', canonicalUrl);
-      SEOController.setMetaTag('og-type', 'content', 'website');
+// ============================================================================
+// STATELESS ROUTE HANDLERS (Consumes <head> Parallel Prefetch + WRS Queue)
+// ============================================================================
 
-      SEOController.removeJsonLdScripts();
+// 1. HOMEPAGE ROUTE: / (24 Articles + Bottom Category Directory Hub)
+async function renderHome() {
+  try {
+    const res = await fetchPrimaryJson(`${API_BASE}/api/articles/random?limit=24`);
+    if (!res.ok) throw new Error('Failed to load homepage feed');
 
-      var itemListElements = [];
-      if (Array.isArray(articles)) {
-        for (var i = 0; i < articles.length; i++) {
-          var a = articles[i];
-          var itemUrl = Utils.buildCanonicalUrl(a.url || ('/?category=' + encodeURIComponent(a.category) + '&slug=' + encodeURIComponent(a.slug)));
-          itemListElements.push({
+    const data = await res.json();
+    const articles = Array.isArray(data.articles) ? data.articles : [];
+    const categories = Array.isArray(data.categories) ? data.categories : [];
+
+    const firstValidCard = articles.find((a) => safeImgUrl(a.image || a.thumbnail) !== FALLBACK_SVG_URI);
+    const firstImage = firstValidCard
+      ? safeImgUrl(firstValidCard.image || firstValidCard.thumbnail)
+      : FALLBACK_SVG_URI;
+
+    const homeSchema = {
+      '@context': 'https://schema.org',
+      '@graph': [
+        {
+          '@type': 'WebSite',
+          name: DEFAULT_SITE_NAME,
+          url: `${SITE_ORIGIN}/`,
+          description: DEFAULT_DESC
+        },
+        {
+          '@type': 'ItemList',
+          itemListElement: articles.map((item, idx) => ({
             '@type': 'ListItem',
-            'position': i + 1,
-            'name': a.title,
-            'url': itemUrl
-          });
+            position: idx + 1,
+            url: `${SITE_ORIGIN}${item.url || buildArticlePath(item.category, item.slug)}`,
+            name: item.title
+          }))
         }
-      }
+      ]
+    };
 
-      SEOController.injectJsonLd('json-ld-schema', {
-        '@context': 'https://schema.org',
-        '@graph': [
-          {
-            '@type': 'WebSite',
-            'name': AppConfig.SITE_TITLE,
-            'url': canonicalUrl,
-            'potentialAction': {
-              '@type': 'SearchAction',
-              'target': canonicalUrl + '?q={search_term_string}',
-              'query-input': 'required name=search_term_string'
+    setRouteFingerprint({ route: 'home' });
+
+    updateSEO({
+      title: DEFAULT_SITE_NAME,
+      description: DEFAULT_DESC,
+      keywords: DEFAULT_KEYWORDS,
+      canonicalPath: '/',
+      robots: articles.length > 0 ? 'index, follow' : 'noindex, follow',
+      ogType: 'website',
+      ogImage: firstImage,
+      schema: homeSchema
+    });
+
+    appContainer.innerHTML = Templates.listingView({
+      heading: data.categoryLabel
+        ? `Featured Technical Guides: ${data.categoryLabel}`
+        : 'Featured Technical Specifications & Guides',
+      subheading: 'Explore verified schematics, diagnostic procedures, and component specifications.',
+      articles,
+      showHomeCategories: true,
+      categories
+    });
+    setAppBusy(false);
+
+    // Dispatch fallback category fetch synchronously (zero rAF gap for WRS) + Global Ads
+    const categoryHydrationPromise =
+      categories.length === 0 ? hydrateHomeCategoriesIfMissing() : Promise.resolve();
+    const globalAdsPromise = scheduleGlobalAds();
+
+    await Promise.all([categoryHydrationPromise, globalAdsPromise]);
+    finalizeEngine();
+  } catch (_) {
+    renderNotFound('Unable to load homepage technical listings.');
+  }
+}
+
+// 2. DYNAMIC CATEGORY ROUTE: /?category=<db> (Distinct CollectionPage + ItemList Graph)
+async function renderCategory(categorySlug) {
+  try {
+    const res = await fetchPrimaryJson(
+      `${API_BASE}/api/category/${encodeURIComponent(categorySlug)}?limit=24`
+    );
+    if (res.status === 404) {
+      return renderNotFound(`Category "${categorySlug}" was not found.`);
+    }
+    if (!res.ok) throw new Error('Category fetch failed');
+
+    const data = await res.json();
+    const articles = Array.isArray(data.articles) ? data.articles : [];
+    const trueCategory = data.category || categorySlug;
+    const categoryLabel = data.categoryLabel || trueCategory;
+    const canonicalPath = buildCategoryPath(trueCategory);
+    const fullCategoryUrl = `${SITE_ORIGIN}${canonicalPath}`;
+    const categoryDescription = `Browse ${data.totalInCategory || articles.length} technical specifications, diagrams, and troubleshooting articles in ${categoryLabel}.`;
+
+    const firstValidCard = articles.find((a) => safeImgUrl(a.image || a.thumbnail) !== FALLBACK_SVG_URI);
+    const firstImage = firstValidCard
+      ? safeImgUrl(firstValidCard.image || firstValidCard.thumbnail)
+      : FALLBACK_SVG_URI;
+
+    const categorySchema = {
+      '@context': 'https://schema.org',
+      '@graph': [
+        {
+          '@type': 'CollectionPage',
+          name: `${categoryLabel} Specifications & Diagrams | ${DEFAULT_SITE_NAME}`,
+          description: categoryDescription,
+          url: fullCategoryUrl
+        },
+        {
+          '@type': 'BreadcrumbList',
+          itemListElement: [
+            {
+              '@type': 'ListItem',
+              position: 1,
+              name: 'Home',
+              item: `${SITE_ORIGIN}/`
+            },
+            {
+              '@type': 'ListItem',
+              position: 2,
+              name: categoryLabel,
+              item: fullCategoryUrl
             }
-          },
-          {
-            '@type': 'ItemList',
-            'itemListElement': itemListElements
-          }
-        ]
-      });
-    },
-
-    /* 2. Category Page SEO: <title>, Canonical (/?category=<db>), robots (index, follow), NO JSON-LD */
-    applyCategorySEO: function(categorySlug, categoryLabel, totalCount) {
-      var pageTitle = (categoryLabel || categorySlug) + ' Specifications - ' + AppConfig.SITE_TITLE;
-      var canonicalUrl = Utils.buildCanonicalUrl('/?category=' + encodeURIComponent(categorySlug));
-      var desc = 'Explore ' + (totalCount || '') + ' technical specifications and wiring schematics in the ' + (categoryLabel || categorySlug) + ' category database.';
-
-      document.title = pageTitle;
-      SEOController.setMetaTag('dynamic-canonical', 'href', canonicalUrl);
-      SEOController.setMetaTag('dynamic-robots', 'content', 'index, follow');
-      SEOController.setMetaTag('dynamic-description', 'content', desc);
-      SEOController.setMetaTag('dynamic-keywords', 'content', categoryLabel || categorySlug);
-      SEOController.setMetaTag('og-title', 'content', pageTitle);
-      SEOController.setMetaTag('og-description', 'content', desc);
-      SEOController.setMetaTag('og-url', 'content', canonicalUrl);
-      SEOController.setMetaTag('og-type', 'content', 'website');
-
-      /* Blueprint rule: No JSON-LD on Category pages */
-      SEOController.removeJsonLdScripts();
-    },
-
-    /* 3. Single Article SEO: <title>, Canonical, metaDesc, #json-ld-schema (Article) & #json-ld-breadcrumb */
-    applySingleArticleSEO: function(article) {
-      var pageTitle = article.title + ' - ' + AppConfig.SITE_TITLE;
-      var canonicalPath = article.canonicalPath || ('/?category=' + encodeURIComponent(article.category) + '&slug=' + encodeURIComponent(article.slug));
-      var canonicalUrl = Utils.buildCanonicalUrl(canonicalPath);
-      var desc = article.metaDesc || (Array.isArray(article.sentences) && article.sentences[0]) || article.title;
-
-      document.title = pageTitle;
-      SEOController.setMetaTag('dynamic-canonical', 'href', canonicalUrl);
-      SEOController.setMetaTag('dynamic-robots', 'content', 'index, follow');
-      SEOController.setMetaTag('dynamic-description', 'content', desc);
-      SEOController.setMetaTag('dynamic-keywords', 'content', article.metaKeywords || article.keyword || '');
-      SEOController.setMetaTag('og-title', 'content', pageTitle);
-      SEOController.setMetaTag('og-description', 'content', desc);
-      SEOController.setMetaTag('og-url', 'content', canonicalUrl);
-      SEOController.setMetaTag('og-type', 'content', 'article');
-
-      var firstImg = (Array.isArray(article.images) && article.images[0] && article.images[0].url) || '';
-      SEOController.setMetaTag('og-image', 'content', firstImg);
-
-      SEOController.removeJsonLdScripts();
-
-      var imageObjects = [];
-      if (Array.isArray(article.images)) {
-        for (var i = 0; i < article.images.length; i++) {
-          var img = article.images[i];
-          imageObjects.push({
-            '@type': 'ImageObject',
-            'url': img.url,
-            'width': img.width || 600,
-            'height': img.height || 400,
-            'caption': img.title || img.alt || article.title
-          });
+          ]
+        },
+        {
+          '@type': 'ItemList',
+          itemListElement: articles.map((item, idx) => ({
+            '@type': 'ListItem',
+            position: idx + 1,
+            url: `${SITE_ORIGIN}${item.url || buildArticlePath(item.category || trueCategory, item.slug)}`,
+            name: item.title
+          }))
         }
-      }
+      ]
+    };
 
-      var bodyText = Array.isArray(article.sentences) && article.sentences.length > 0
-        ? article.sentences.join(' ')
-        : (article.content || '');
+    setRouteFingerprint({ route: 'category', category: trueCategory });
 
-      SEOController.injectJsonLd('json-ld-schema', {
-        '@context': 'https://schema.org',
-        '@type': 'Article',
-        'headline': article.title,
-        'description': desc,
-        'keywords': article.metaKeywords || article.keyword || '',
-        'articleSection': article.categoryLabel || article.category,
-        'articleBody': bodyText,
-        'image': imageObjects,
-        'datePublished': Utils.toIsoDate(article.createdAt),
-        'dateModified': Utils.toIsoDate(article.updatedAt),
-        'mainEntityOfPage': {
-          '@type': 'WebPage',
-          '@id': canonicalUrl
-        }
-      });
+    updateSEO({
+      title: `${categoryLabel} Specifications & Diagrams | ${DEFAULT_SITE_NAME}`,
+      description: categoryDescription,
+      keywords: `${categoryLabel}, ${DEFAULT_KEYWORDS}`,
+      canonicalPath,
+      robots: articles.length > 0 ? 'index, follow' : 'noindex, follow',
+      ogType: 'website',
+      ogImage: firstImage,
+      schema: categorySchema
+    });
 
-      SEOController.injectJsonLd('json-ld-breadcrumb', {
-        '@context': 'https://schema.org',
-        '@type': 'BreadcrumbList',
-        'itemListElement': [
-          {
-            '@type': 'ListItem',
-            'position': 1,
-            'name': 'Home',
-            'item': Utils.buildCanonicalUrl('/')
-          },
-          {
-            '@type': 'ListItem',
-            'position': 2,
-            'name': article.categoryLabel || article.category,
-            'item': Utils.buildCanonicalUrl('/?category=' + encodeURIComponent(article.category))
-          },
-          {
-            '@type': 'ListItem',
-            'position': 3,
-            'name': article.title,
-            'item': canonicalUrl
-          }
-        ]
-      });
-    },
+    appContainer.innerHTML = Templates.listingView({
+      heading: categoryLabel,
+      subheading: `${data.totalInCategory || articles.length} indexed technical articles in ${categoryLabel}.`,
+      breadcrumbLabel: categoryLabel,
+      articles,
+      showHomeCategories: false
+    });
+    setAppBusy(false);
 
-    /* 4. 404 / Error SEO: noindex, nofollow, "Page Not Found - " + siteTitle, strip JSON-LD */
-    apply404SEO: function() {
-      document.title = 'Page Not Found - ' + AppConfig.SITE_TITLE;
-      SEOController.setMetaTag('dynamic-robots', 'content', 'noindex, nofollow');
-      SEOController.removeJsonLdScripts();
+    await scheduleGlobalAds();
+    finalizeEngine();
+  } catch (_) {
+    renderNotFound('Unable to load category articles.');
+  }
+}
+
+// 3. SINGLE ARTICLE ROUTE: /?category=<db>&slug=<slug> (Includes Structured ImageObject Array)
+async function renderArticle(categorySlug, articleSlug) {
+  try {
+    // PHASE 1: Consume In-Flight <head> Prefetch (or High-Priority Fetch Fallback)
+    const res = await fetchPrimaryJson(
+      `${API_BASE}/api/article?category=${encodeURIComponent(categorySlug)}&slug=${encodeURIComponent(articleSlug)}`
+    );
+    if (res.status === 404 || res.status === 400) {
+      return renderNotFound('The requested technical article could not be found.');
     }
-  };
+    if (!res.ok) throw new Error('Single article fetch failed');
 
-  /* -------------------------------------------------------------------------
-     MODULE D: API CLIENT (CORS-direct fetch + lightweight memory cache)
-     ------------------------------------------------------------------------- */
-  var ApiClient = {
-    cache: {},
+    const article = await res.json();
+    const trueCategory = article.category || categorySlug;
+    const trueSlug = article.slug || articleSlug;
+    const categoryLabel = article.categoryLabel || trueCategory;
+    const canonicalPath = article.canonicalPath || buildArticlePath(trueCategory, trueSlug);
+    const fullArticleUrl = `${SITE_ORIGIN}${canonicalPath}`;
+    const fullCategoryUrl = `${SITE_ORIGIN}${buildCategoryPath(trueCategory)}`;
 
-    fetchJson: function(path, useCache) {
-      var fullUrl = AppConfig.API_BASE + path;
-      if (useCache && ApiClient.cache[fullUrl]) {
-        return Promise.resolve(ApiClient.cache[fullUrl]);
-      }
-      return fetch(fullUrl, {
-        method: 'GET',
-        headers: { 'Accept': 'application/json' }
-      }).then(function(response) {
-        if (!response.ok) {
-          var err = new Error('HTTP ' + response.status);
-          err.status = response.status;
-          throw err;
-        }
-        return response.json();
-      }).then(function(data) {
-        if (useCache) {
-          ApiClient.cache[fullUrl] = data;
-        }
-        return data;
-      });
-    },
+    const images = Array.isArray(article.images) ? article.images : [];
+    const imageObjects = buildArticleImageObjects(images, article.title, fullArticleUrl);
+    const primaryOgImage = imageObjects.length > 0 ? imageObjects[0].url : FALLBACK_SVG_URI;
 
-    getHomepageOrSearch: function(query) {
-      var qParam = query ? '&q=' + encodeURIComponent(query) : '';
-      return ApiClient.fetchJson('/api/articles/random?limit=' + AppConfig.HOMEPAGE_LIMIT + qParam, false);
-    },
+    const publishedIso = toIsoDate(article.createdAt);
+    const modifiedIso = toIsoDate(article.updatedAt || article.createdAt);
+    const metaDesc = article.metaDesc || (article.sentences && article.sentences[0]) || DEFAULT_DESC;
+    const metaKeywords = article.metaKeywords || `${article.keyword || ''}, ${categoryLabel}`;
 
-    getCategoryListing: function(categorySlug, query) {
-      var qParam = query ? '&q=' + encodeURIComponent(query) : '';
-      return ApiClient.fetchJson('/api/category/' + encodeURIComponent(categorySlug) + '?limit=' + AppConfig.CATEGORY_LIMIT + qParam, false);
-    },
-
-    getCategories: function() {
-      return ApiClient.fetchJson('/api/categories', true);
-    },
-
-    getSingleArticle: function(categorySlug, articleSlug) {
-      var path = '/api/article?category=' + encodeURIComponent(categorySlug) + '&slug=' + encodeURIComponent(articleSlug);
-      return ApiClient.fetchJson(path, true);
-    },
-
-    getRandomArticles: function(limit) {
-      return ApiClient.fetchJson('/api/articles/random?limit=' + (limit || 10), false);
-    },
-
-    getActiveDomains: function() {
-      return ApiClient.fetchJson('/api/domains/status', false);
-    }
-  };
-
-  /* -------------------------------------------------------------------------
-     MODULE E: ROUTER & VIEW STATE MACHINE
-     ------------------------------------------------------------------------- */
-  var Router = {
-    activeRequestId: 0,
-
-    parseCurrentRoute: function() {
-      var params = new URLSearchParams(window.location.search);
-      var category = (params.get('category') || '').trim();
-      var slug = (params.get('slug') || '').trim();
-      var query = (params.get('q') || params.get('keyword') || '').trim();
-
-      if (category && slug) {
-        return { view: 'article', category: category, slug: slug, query: '' };
-      }
-      if (category) {
-        return { view: 'category', category: category, slug: '', query: query };
-      }
-      return { view: 'home', category: '', slug: '', query: query };
-    },
-
-    renderCategoryBar: function(categories, activeCategorySlug, shouldShow) {
-      var barEl = document.getElementById('bbs-catbar');
-      var listEl = document.getElementById('bbs-catbar-list');
-      if (!barEl || !listEl) return;
-
-      if (!shouldShow) {
-        barEl.setAttribute('hidden', 'hidden');
-        return;
-      }
-
-      if (!Array.isArray(categories) || categories.length === 0) {
-        barEl.setAttribute('hidden', 'hidden');
-        return;
-      }
-
-      var totalArticles = 0;
-      for (var i = 0; i < categories.length; i++) {
-        totalArticles += (categories[i].count || 0);
-      }
-
-      var html = ThemeTemplates.categoryPill(
-        { category: 'all', label: 'All Specifications', count: totalArticles },
-        activeCategorySlug || 'all'
-      );
-
-      for (var j = 0; j < categories.length; j++) {
-        html += ThemeTemplates.categoryPill(categories[j], activeCategorySlug);
-      }
-
-      listEl.innerHTML = html;
-      barEl.removeAttribute('hidden');
-    },
-
-    render404: function(mountEl, title, message) {
-      Router.renderCategoryBar([], '', false);
-      SEOController.apply404SEO();
-      mountEl.innerHTML = ThemeTemplates.error404View(title, message);
-    },
-
-    /* View 1: Homepage (`/` or `/?q=<query>`) */
-    loadHomepageView: function(route, reqId, mountEl) {
-      mountEl.innerHTML = ThemeTemplates.gridSkeleton(8);
-      var searchInput = document.getElementById('bbs-search-input');
-      if (searchInput) searchInput.value = route.query || '';
-
-      ApiClient.getHomepageOrSearch(route.query)
-        .then(function(data) {
-          if (reqId !== Router.activeRequestId) return;
-          var articles = (data && Array.isArray(data.articles)) ? data.articles : [];
-          var categories = (data && Array.isArray(data.categories)) ? data.categories : [];
-
-          if (articles.length === 0) {
-            Router.render404(
-              mountEl,
-              route.query ? 'No Matching Specifications' : 'No Specifications Available',
-              route.query ? 'No technical records matched "' + route.query + '". Try a broader sensor or system keyword.' : 'The in-memory specification database returned an empty listing.'
-            );
-            return;
-          }
-
-          Router.renderCategoryBar(categories, 'all', true);
-          SEOController.applyHomepageSEO(articles, route.query);
-
-          var eyebrow = route.query ? 'GLOBAL KEYWORD SEARCH' : 'RANDOMIZED MULTI-SQLITE SAMPLING';
-          var heading = route.query ? 'Search Results for "' + route.query + '"' : 'Technical Specification Directory';
-          var metaBadge = Utils.escapeHtml(articles.length + ' articles loaded · ' + categories.length + ' DBs');
-
-          var cardsHtml = '';
-          for (var i = 0; i < articles.length; i++) {
-            cardsHtml += ThemeTemplates.articleCard(articles[i]);
-          }
-
-          mountEl.innerHTML =
-            ThemeTemplates.listingBanner(eyebrow, heading, metaBadge) +
-            '<section class="bbs-grid" aria-label="Technical specification cards">' + cardsHtml + '</section>';
-        })
-        .catch(function() {
-          if (reqId !== Router.activeRequestId) return;
-          Router.render404(mountEl, 'Page Not Found', 'Unable to load specifications from the backend engine.');
-        });
-    },
-
-    /* View 2: Category View (`/?category=<db>`) */
-    loadCategoryView: function(route, reqId, mountEl) {
-      mountEl.innerHTML = ThemeTemplates.gridSkeleton(8);
-
-      /* Primary call + Deferred categories bar call */
-      ApiClient.getCategoryListing(route.category, route.query)
-        .then(function(data) {
-          if (reqId !== Router.activeRequestId) return;
-          var articles = (data && Array.isArray(data.articles)) ? data.articles : [];
-          if (articles.length === 0) {
-            Router.render404(
-              mountEl,
-              'Category Not Found or Empty',
-              'No technical specifications were found in category "' + route.category + '".'
-            );
-            return;
-          }
-
-          var catLabel = data.categoryLabel || route.category;
-          SEOController.applyCategorySEO(route.category, catLabel, data.totalInCategory);
-
-          var cardsHtml = '';
-          for (var i = 0; i < articles.length; i++) {
-            cardsHtml += ThemeTemplates.articleCard(articles[i]);
-          }
-
-          var metaBadge = Utils.escapeHtml((data.totalInCategory || articles.length) + ' total records in memory');
-          mountEl.innerHTML =
-            ThemeTemplates.listingBanner('CATEGORY DATABASE // ' + route.category.toUpperCase(), catLabel, metaBadge) +
-            '<section class="bbs-grid" aria-label="Category specification cards">' + cardsHtml + '</section>';
-
-          /* Secondary/Deferred call for Category Navigation Bar */
-          ApiClient.getCategories()
-            .then(function(catResp) {
-              if (reqId !== Router.activeRequestId) return;
-              if (catResp && Array.isArray(catResp.categories)) {
-                Router.renderCategoryBar(catResp.categories, route.category, true);
+    const articleSchema = {
+      '@context': 'https://schema.org',
+      '@graph': [
+        {
+          '@type': 'Article',
+          headline: article.title,
+          description: metaDesc,
+          keywords: metaKeywords,
+          ...(imageObjects.length > 0
+            ? {
+                primaryImageOfPage: { '@id': imageObjects[0]['@id'] },
+                image: imageObjects
               }
-            })
-            .catch(function() {});
-        })
-        .catch(function() {
-          if (reqId !== Router.activeRequestId) return;
-          Router.render404(
-            mountEl,
-            'Category Database Not Found',
-            'The category database "' + route.category + '" does not exist in memory.'
-          );
-        });
-    },
-
-    /* View 3: Single Article View (`/?category=<db>&slug=<slug>`) */
-    loadSingleArticleView: function(route, reqId, mountEl) {
-      /* Section 5 Blueprint Rule: Omit the category bar on Single Article pages */
-      Router.renderCategoryBar([], '', false);
-      mountEl.innerHTML = ThemeTemplates.gridSkeleton(3);
-
-      ApiClient.getSingleArticle(route.category, route.slug)
-        .then(function(article) {
-          if (reqId !== Router.activeRequestId) return;
-          if (!article || !article.title) {
-            Router.render404(mountEl, 'Article Not Found', 'The requested specification could not be located.');
-            return;
+            : {}),
+          datePublished: publishedIso,
+          dateModified: modifiedIso,
+          author: {
+            '@type': 'Organization',
+            name: DEFAULT_SITE_NAME,
+            url: `${SITE_ORIGIN}/`
+          },
+          publisher: {
+            '@type': 'Organization',
+            name: DEFAULT_SITE_NAME,
+            url: `${SITE_ORIGIN}/`
+          },
+          mainEntityOfPage: {
+            '@type': 'WebPage',
+            '@id': fullArticleUrl
           }
+        },
+        {
+          '@type': 'BreadcrumbList',
+          itemListElement: [
+            {
+              '@type': 'ListItem',
+              position: 1,
+              name: 'Home',
+              item: `${SITE_ORIGIN}/`
+            },
+            {
+              '@type': 'ListItem',
+              position: 2,
+              name: categoryLabel,
+              item: fullCategoryUrl
+            },
+            {
+              '@type': 'ListItem',
+              position: 3,
+              name: article.title,
+              item: fullArticleUrl
+            }
+          ]
+        }
+      ]
+    };
 
-          SEOController.applySingleArticleSEO(article);
-          mountEl.innerHTML = ThemeTemplates.singleArticleView(article);
-          window.scrollTo(0, 0);
+    setRouteFingerprint({ route: 'article', category: trueCategory, slug: trueSlug });
 
-          /* Deferred Call 1: Related Posts (same domain, limit=10) */
-          ApiClient.getRandomArticles(AppConfig.RELATED_POSTS_LIMIT)
-            .then(function(relData) {
-              if (reqId !== Router.activeRequestId) return;
-              var relMount = document.getElementById('bbs-related-posts-mount');
-              if (relMount) {
-                var list = (relData && Array.isArray(relData.articles)) ? relData.articles : [];
-                relMount.innerHTML = ThemeTemplates.relatedPostsList(list);
-              }
-            })
-            .catch(function() {
-              var relMount = document.getElementById('bbs-related-posts-mount');
-              if (relMount) relMount.innerHTML = '<p class="bbs-rel-item__meta">Unable to load related posts.</p>';
+    updateSEO({
+      title: `${article.title} | ${DEFAULT_SITE_NAME}`,
+      description: metaDesc,
+      keywords: metaKeywords,
+      canonicalPath,
+      robots: 'index, follow',
+      ogType: 'article',
+      ogImage: primaryOgImage,
+      schema: articleSchema
+    });
+
+    // Paint Primary Article Immediately (Hero + Sentences + All Images Gallery)
+    appContainer.innerHTML = Templates.singleArticle(article);
+    setAppBusy(false);
+
+    // PHASE 2: Dispatched synchronously (zero rAF network-idle gap so Googlebot WRS captures all links)
+    const bottomLinksPromise = hydrateArticleBottomSlots(trueCategory, trueSlug);
+    const globalAdsPromise = scheduleGlobalAds();
+
+    await Promise.all([bottomLinksPromise, globalAdsPromise]);
+    finalizeEngine();
+  } catch (_) {
+    renderNotFound('Unable to load the requested technical article.');
+  }
+}
+
+// PHASE 2 HELPER: Low-Priority Related Posts (limit=5) & Cross-Domain Links (limit=5)
+function hydrateArticleBottomSlots(categorySlug, currentArticleSlug) {
+  const relatedSlot = document.getElementById('related-posts-slot');
+  const crossDomainSlot = document.getElementById('cross-domain-slot');
+
+  // 2A. Same-Domain Related Posts (limit=5, request 6 to filter out current slug)
+  const relatedPromise = relatedSlot
+    ? fetch(
+        `${API_BASE}/api/articles/random?category=${encodeURIComponent(categorySlug)}&limit=6`,
+        {
+          priority: 'low',
+          cache: 'no-store'
+        }
+      )
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (!data || !Array.isArray(data.articles) || !Templates) return;
+          const relatedItems = data.articles
+            .filter((item) => item.slug !== currentArticleSlug)
+            .slice(0, 5);
+
+          if (relatedItems.length > 0) {
+            relatedSlot.innerHTML = Templates.relatedPosts(relatedItems);
+            relatedSlot.hidden = false;
+          }
+        })
+        .catch(() => {})
+    : Promise.resolve();
+
+  // 2B. Cross-Domain Related Links (limit=5 domains + limit=5 random articles)
+  const crossDomainPromise = crossDomainSlot
+    ? Promise.all([
+        fetch(`${API_BASE}/api/domains/status?limit=5`, {
+          priority: 'low',
+          cache: 'no-store'
+        }).then((r) => (r.ok ? r.json() : null)),
+        fetch(`${API_BASE}/api/articles/random?limit=5`, {
+          priority: 'low',
+          cache: 'no-store'
+        }).then((r) => (r.ok ? r.json() : null))
+      ])
+        .then(([domainData, articleData]) => {
+          if (!domainData || !articleData || !Templates) return;
+          const domains = Array.isArray(domainData.activeDomains) ? domainData.activeDomains : [];
+          const articles = Array.isArray(articleData.articles) ? articleData.articles : [];
+          const count = Math.min(5, domains.length, articles.length);
+
+          if (count === 0) return;
+
+          const pairs = [];
+          for (let i = 0; i < count; i++) {
+            const cleanOrigin = String(domains[i]).replace(/\/+$/, '');
+            const art = articles[i];
+            const path = art.url || buildArticlePath(art.category, art.slug);
+            let domainHost = cleanOrigin;
+            try {
+              domainHost = new URL(cleanOrigin).hostname;
+            } catch (_) {}
+
+            pairs.push({
+              fullUrl: `${cleanOrigin}${path}`,
+              title: art.title,
+              domainHost,
+              categoryLabel: art.categoryLabel || art.category
             });
+          }
 
-          /* Deferred Call 2: Cross-Domain Related Links (limit=5 + /api/domains/status) */
-          Promise.all([
-            ApiClient.getRandomArticles(AppConfig.CROSS_DOMAIN_LINKS_LIMIT),
-            ApiClient.getActiveDomains()
-          ]).then(function(results) {
-            if (reqId !== Router.activeRequestId) return;
-            var randomFive = (results[0] && Array.isArray(results[0].articles)) ? results[0].articles : [];
-            var domainInfo = results[1] || {};
-            var domainPool = Array.isArray(domainInfo.activeDomains) && domainInfo.activeDomains.length > 0
-              ? domainInfo.activeDomains
-              : (Array.isArray(domainInfo.activeHttp200Domains) ? domainInfo.activeHttp200Domains : []);
-
-            var crossMount = document.getElementById('bbs-cross-domain-mount');
-            if (crossMount) {
-              crossMount.innerHTML = ThemeTemplates.crossDomainLinksList(randomFive, domainPool);
-            }
-          }).catch(function() {
-            var crossMount = document.getElementById('bbs-cross-domain-mount');
-            if (crossMount) crossMount.innerHTML = '<p class="bbs-rel-item__meta">Unable to load network links.</p>';
-          });
+          if (pairs.length > 0) {
+            crossDomainSlot.innerHTML = Templates.crossDomainLinks(pairs);
+            crossDomainSlot.hidden = false;
+          }
         })
-        .catch(function() {
-          if (reqId !== Router.activeRequestId) return;
-          Router.render404(
-            mountEl,
-            'Specification Not Found',
-            'No article matched category "' + route.category + '" and slug "' + route.slug + '".'
-          );
-        });
-    },
+        .catch(() => {})
+    : Promise.resolve();
 
-    dispatch: function() {
-      var mountEl = document.getElementById('bbs-view-mount');
-      if (!mountEl) return;
+  return Promise.all([relatedPromise, crossDomainPromise]);
+}
 
-      Router.activeRequestId += 1;
-      var currentReqId = Router.activeRequestId;
-      var route = Router.parseCurrentRoute();
+// ============================================================================
+// STATELESS INITIAL PAGE-LOAD DISPATCHER
+// ============================================================================
+function initPage() {
+  setAppBusy(true);
 
-      if (route.view === 'article') {
-        Router.loadSingleArticleView(route, currentReqId, mountEl);
-      } else if (route.view === 'category') {
-        Router.loadCategoryView(route, currentReqId, mountEl);
-      } else {
-        Router.loadHomepageView(route, currentReqId, mountEl);
-      }
-    },
-
-    navigate: function(href) {
-      if (!href) return;
-      var targetUrl = new URL(href, window.location.origin);
-      if (targetUrl.origin !== window.location.origin) {
-        window.location.href = href;
-        return;
-      }
-      window.history.pushState({}, '', targetUrl.pathname + targetUrl.search);
-      Router.dispatch();
-    },
-
-    initEvents: function() {
-      /* Intercept internal CSR links for instant SPA transitions */
-      document.addEventListener('click', function(e) {
-        var anchor = e.target.closest ? e.target.closest('a[data-csr-link="true"]') : null;
-        if (!anchor) return;
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
-        var href = anchor.getAttribute('href');
-        if (!href) return;
-        e.preventDefault();
-        Router.navigate(href);
-      });
-
-      /* Search Form Handler */
-      var searchForm = document.getElementById('bbs-search-form');
-      if (searchForm) {
-        searchForm.addEventListener('submit', function(e) {
-          e.preventDefault();
-          var input = document.getElementById('bbs-search-input');
-          var q = input ? input.value.trim() : '';
-          Router.navigate(q ? '/?q=' + encodeURIComponent(q) : '/');
-        });
-      }
-
-      /* Theme Switcher Handler */
-      var themeBtn = document.getElementById('bbs-theme-toggle');
-      if (themeBtn) {
-        themeBtn.addEventListener('click', function() {
-          var current = document.documentElement.getAttribute('data-theme') || 'light';
-          var next = current === 'dark' ? 'light' : 'dark';
-          document.documentElement.setAttribute('data-theme', next);
-          try { localStorage.setItem('bbs_theme', next); } catch (err) {}
-        });
-      }
-
-      /* Footer dynamic links (Index only) */
-
-      /* Browser Back/Forward Navigation */
-      window.addEventListener('popstate', function() {
-        Router.dispatch();
-      });
-    }
-  };
-
-  /* Bootstrap CSR Engine */
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function() {
-      Router.initEvents();
-      Router.dispatch();
-    });
-  } else {
-    Router.initEvents();
-    Router.dispatch();
+  const pathname = window.location.pathname;
+  if (pathname !== '/' && pathname !== '/index.html') {
+    return renderNotFound('Page path does not exist.');
   }
 
-  /* -------------------------------------------------------------------------
-     MODULE F: POST-RENDER SCRIPT TAG CLEANUP
-     Automatically removes the app.js <script> element from the DOM once
-     CSR view hydration finishes, keeping in-memory SPA listeners active.
-     ------------------------------------------------------------------------- */
-  var currentScriptEl = document.currentScript;
-  var TARGET_SRC = 'https://cdn.jsdelivr.net/gh/luqmanthinkpad/bunbun/app.js';
+  // Automatically ignores Blogger's mobile ?m=1 or ?m=0 query parameters
+  const params = new URLSearchParams(window.location.search);
+  const category = (params.get('category') || '').trim();
+  const slug = (params.get('slug') || '').trim();
 
-  function removeAppsScript() {
-    if (currentScriptEl && currentScriptEl.parentNode) {
-      currentScriptEl.parentNode.removeChild(currentScriptEl);
-    }
-    var scripts = document.querySelectorAll('script[src]');
-    for (var i = 0; i < scripts.length; i++) {
-      var rawSrc = scripts[i].getAttribute('src') || '';
-      var fullSrc = scripts[i].src || '';
-      if (rawSrc === TARGET_SRC || fullSrc === TARGET_SRC || rawSrc.indexOf('/bunbun/app.js') !== -1) {
-        if (scripts[i].parentNode) {
-          scripts[i].parentNode.removeChild(scripts[i]);
-        }
-      }
-    }
+  if (!category && !slug) {
+    return renderHome();
+  }
+  if (category && !slug) {
+    return renderCategory(category);
+  }
+  if (category && slug) {
+    return renderArticle(category, slug);
   }
 
-  function isCsrRenderComplete(mount) {
-    if (!mount || mount.children.length === 0) return false;
-    var hasSkeleton = mount.querySelector('.bbs-skeleton') !== null;
-    var hasRenderedView = mount.querySelector('.bbs-view-banner, .bbs-article-layout, .bbs-state-box') !== null;
-    return hasRenderedView && !hasSkeleton;
-  }
+  return renderNotFound('Invalid query parameters.');
+}
 
-  function initScriptCleanup() {
-    var mount = document.getElementById('bbs-view-mount');
-    if (!mount) {
-      window.addEventListener('load', removeAppsScript, { once: true });
-      return;
-    }
-
-    if (isCsrRenderComplete(mount)) {
-      removeAppsScript();
-      return;
-    }
-
-    var observer = new MutationObserver(function() {
-      if (isCsrRenderComplete(mount)) {
-        observer.disconnect();
-        removeAppsScript();
-      }
-    });
-
-    observer.observe(mount, { childList: true, subtree: true });
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initScriptCleanup, { once: true });
-  } else {
-    initScriptCleanup();
-  }
-
-})(window, document);
+initPage();
